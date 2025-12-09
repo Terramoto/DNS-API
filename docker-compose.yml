@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  dns-api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./geoip_db:/app/geoip_db
+    environment:
+      - PYTHONPATH=/app
+    restart: unless-stopped
