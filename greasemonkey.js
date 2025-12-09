@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      2.5
 // @description  Detects selected domains or IPs and displays a floating panel with DNS and GeoIP information using an external API.
-// @author       Gemini
+// @author       Terramoto
 // @match        *://*/*
 // @grant        GM.xmlHttpRequest
 // @grant        GM_xmlHttpRequest
