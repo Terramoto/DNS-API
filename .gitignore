@@ -46,4 +46,4 @@ docker-compose.override.yml
 .env
 
 # downloaded db
-geoip_db
+geoip_db/*
