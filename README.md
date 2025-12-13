@@ -1,6 +1,7 @@
 # DNS Lookup API
 
 A FastAPI-based REST API for retrieving DNS records and IP geolocation information for any domain.
+I did this for IT work, it helps find domains details without having to go to other websites or use tools.
 
 ## Browser Extension
 
