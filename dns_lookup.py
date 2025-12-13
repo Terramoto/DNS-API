@@ -1,6 +1,7 @@
 import dns.resolver
+import dns.reversename
 import asyncio
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 async def get_domain_ips(domain: str) -> List[str]:
     """
@@ -61,5 +62,17 @@ async def get_dns_records(domain: str) -> Dict:
         records['CNAME_WWW'] = [str(cname) for cname in cname_records]
     except Exception as e:
         records['CNAME_WWW'] = []
-    
+
     return records
+
+async def get_ptr_record(ip_address: str) -> Optional[str]:
+    """ Resolve PTR record for an IP address. """
+    try:
+        # Create reverse DNS name from IP address
+        reverse_name = dns.reversename.from_address(ip_address)
+        # Query PTR record
+        ptr_records = dns.resolver.resolve(reverse_name, 'PTR')
+        # Return the first PTR record found
+        return str(ptr_records[0]).rstrip('.')
+    except Exception:
+        return None

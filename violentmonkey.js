@@ -131,6 +131,7 @@
                         <h4 style="margin: 0 0 5px 0; color: #4dcfff; font-size: 14px;">IP Information (GeoIP ${index + 1})</h4>
                         <p style="margin: 3px 0;"><strong style="color: #ccc;">IP Address:</strong> ${ipDetail.ip || 'N/A'}</p>
                         <!-- Subnet (CIDR) removed as requested -->
+                        <p style="margin: 3px 0;"><strong style="color: #ccc;">PTR Record:</strong> ${ipDetail.ptr || 'N/A'}</p>
                         <p style="margin: 3px 0;"><strong style="color: #ccc;">Provider:</strong> ${ipDetail.provider || 'N/A'}</p>
                         <p style="margin: 3px 0;"><strong style="color: #ccc;">Location:</strong> ${ipDetail.location || 'N/A'}</p>
                     </div>

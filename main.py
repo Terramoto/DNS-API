@@ -4,7 +4,7 @@ import dns.resolver
 import requests
 import ipaddress
 
-from dns_lookup import get_dns_records, get_domain_ips
+from dns_lookup import get_dns_records, get_domain_ips, get_ptr_record
 from ip_info import get_ip_info
 
 app = FastAPI(
@@ -29,16 +29,19 @@ async def dns_lookup(domain: str) -> Dict:
         # Add IP geolocation information for A records
         if "A" in records and records["A"]:
             ip_info_list = []
-            
+
             for ip in records["A"]:
                 try:
                     # Validate IP address
                     ipaddress.ip_address(ip)
                     ip_info = get_ip_info(ip)
+                    # Get PTR record for the IP
+                    ptr_record = await get_ptr_record(ip)
                     # Handle potential errors from MaxMind
                     if "error" in ip_info:
                         ip_info_list.append({
                             "ip": ip,
+                            "ptr": ptr_record,
                             "provider": "Unknown",
                             "location": "Unknown",
                             "coordinates": {"latitude": None, "longitude": None}
@@ -49,6 +52,7 @@ async def dns_lookup(domain: str) -> Dict:
                         lat, lon = coords.split(",") if "," in coords else (None, None)
                         ip_info_list.append({
                             "ip": ip,
+                            "ptr": ptr_record,
                             "provider": ip_info.get("org", "Unknown"),
                             "location": f"{ip_info.get('city', 'Unknown')}, {ip_info.get('region', 'Unknown')}, {ip_info.get('country', 'Unknown')}",
                             "coordinates": {
@@ -60,11 +64,12 @@ async def dns_lookup(domain: str) -> Dict:
                     # Not a valid IP address
                     ip_info_list.append({
                         "ip": ip,
+                        "ptr": None,
                         "provider": "Invalid IP",
                         "location": "N/A",
                         "coordinates": {"latitude": None, "longitude": None}
                     })
-                
+
             records["A_IP_Info"] = ip_info_list
         else:
             records["A_IP_Info"] = []
