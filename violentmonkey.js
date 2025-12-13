@@ -82,7 +82,7 @@
                 <strong style="font-size: 16px;">Lookup: ${target.value}</strong>
                 <button id="gm-close-btn" style="background: none; border: none; color: white; font-size: 18px; cursor: pointer; padding: 0 5px; line-height: 1;">&times;</button>
             </div>
-            <div id="gm-panel-body" style="padding: 15px; overflow-y: auto;">
+            <div id="gm-panel-body" style="padding: 15px; overflow-y: auto; flex-grow: 1;">
                 ${generateContentHTML(data)}
             </div>
         `;
@@ -330,34 +330,49 @@
     }
 
     // --- Main Event Listener ---
+    let isPanelActive = false;
+
     document.addEventListener('mouseup', function (event) {
         const selection = window.getSelection();
         if (selection.rangeCount > 0) {
-            // Trim and sanitize the selected text
-            const selectedText = selection.toString().trim();
-            const target = isValidTarget(selectedText);
+            // Check if the selection originated from within our panel
+            const selectionContainer = selection.anchorNode;
+            let isSelectionFromPanel = false;
 
-            // Check if the selected text is a valid target
-            if (target) {
-                // Prevent the panel from closing immediately if a valid selection is made
-                event.stopPropagation();
-                fetchDNSInfo(target);
-            } else {
-                // If a selection is made but it's not a domain/IP, hide the existing panel
-                hidePanel();
+            // Check if the selection is inside our panel
+            if (lookupPanel && lookupPanel.contains(selectionContainer)) {
+                isSelectionFromPanel = true;
             }
+
+            // Only process selections that are NOT from our panel
+            if (!isSelectionFromPanel) {
+                // Trim and sanitize the selected text
+                const selectedText = selection.toString().trim();
+                const target = isValidTarget(selectedText);
+
+                // Check if the selected text is a valid target
+                if (target) {
+                    // Prevent the panel from closing immediately if a valid selection is made
+                    event.stopPropagation();
+                    isPanelActive = true;
+                    fetchDNSInfo(target);
+                }
+            }
+            // Don't hide panel when selection changes - let user keep it open
         }
     });
 
     // Handle clicks outside the panel to close it
     document.addEventListener('mousedown', function (event) {
         if (lookupPanel && lookupPanel.contains(event.target)) {
-            // Clicked inside the panel, do nothing
+            // Clicked inside the panel, do nothing to allow scrolling
             return;
         }
 
-        if (lookupPanel && lookupPanel.style.opacity === '1') {
+        // Only hide if clicking outside the panel AND the panel is active
+        if (lookupPanel && lookupPanel.style.opacity === '1' && isPanelActive) {
             hidePanel();
+            isPanelActive = false;
         }
     });
 
