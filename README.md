@@ -5,7 +5,7 @@ I did this for IT work, it helps find domains details without having to go to ot
 
 ## Browser Extension
 
-A Violentmonkey userscript is available that allows you to select domains or IPs on any webpage and retrieve DNS information through this API service. See [USERSCRIPT_README.md](USERSCRIPT_README.md) for installation and usage instructions.
+A Violentmonkey userscript is available that allows you to select domains or IPs on any webpage and retrieve DNS information through this API service.
 
 ## Features
 
@@ -16,6 +16,7 @@ This API provides lookup capabilities for:
 - TXT records
 - www CNAME record with IP addresses
 - IP provider and location information for all IP addresses
+- PTR record for the A record IP
 
 ## Requirements
 
