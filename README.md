@@ -4,7 +4,7 @@ A FastAPI-based REST API for retrieving DNS records and IP geolocation informati
 
 ## Browser Extension
 
-A Greasemonkey/Tampermonkey userscript is available that allows you to select domains or IPs on any webpage and retrieve DNS information through this API service. See [USERSCRIPT_README.md](USERSCRIPT_README.md) for installation and usage instructions.
+A Violentmonkey userscript is available that allows you to select domains or IPs on any webpage and retrieve DNS information through this API service. See [USERSCRIPT_README.md](USERSCRIPT_README.md) for installation and usage instructions.
 
 ## Features
 
@@ -109,5 +109,5 @@ The API will return appropriate HTTP status codes and error messages for invalid
 
 The API uses:
 - `dnspython` for DNS record lookups
-- `MaxMind GeoLite2` databases for IP geolocation data
+- `MaxMind GeoLite2` databases for IP geolocation data  ( https://github.com/P3TERX/GeoLite.mmdb )
 - `FastAPI` for the web framework

@@ -6,12 +6,16 @@ import ipaddress
 
 from dns_lookup import get_dns_records, get_domain_ips, get_ptr_record
 from ip_info import get_ip_info
+from geoip_updater import start_background_updater
 
 app = FastAPI(
     title="DNS Lookup API",
     description="API for retrieving DNS records and IP geolocation information",
     version="1.0.0"
 )
+
+# Start background GeoIP updater thread
+start_background_updater(interval_hours=24)
 
 @app.get("/")
 async def root():

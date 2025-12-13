@@ -1,15 +1,46 @@
 import maxminddb
+import os
 
 # Initialize the MaxMind database readers
-try:
-    city_reader = maxminddb.open_database('geoip_db/GeoLite2-City.mmdb')
-    asn_reader = maxminddb.open_database('geoip_db/GeoLite2-ASN.mmdb')
-    country_reader = maxminddb.open_database('geoip_db/GeoLite2-Country.mmdb')
-except Exception as e:
-    print(f"Error opening MaxMind databases: {e}")
-    city_reader = None
-    asn_reader = None
-    country_reader = None
+def initialize_geoip_readers():
+    """
+    Initialize MaxMind database readers with proper error handling.
+    If databases don't exist, attempt to download them first.
+    """
+    global city_reader, asn_reader, country_reader
+
+    try:
+        # Check if databases exist
+        databases_exist = all([
+            os.path.exists('geoip_db/GeoLite2-City.mmdb'),
+            os.path.exists('geoip_db/GeoLite2-ASN.mmdb'),
+            os.path.exists('geoip_db/GeoLite2-Country.mmdb')
+        ])
+
+        if not databases_exist:
+            print("GeoIP databases not found. Attempting to download...")
+            try:
+                from geoip_updater import update_geoip_databases
+                update_geoip_databases()
+            except Exception as e:
+                print(f"Failed to download GeoIP databases: {e}")
+
+        # Try to open databases
+        city_reader = maxminddb.open_database('geoip_db/GeoLite2-City.mmdb')
+        asn_reader = maxminddb.open_database('geoip_db/GeoLite2-ASN.mmdb')
+        country_reader = maxminddb.open_database('geoip_db/GeoLite2-Country.mmdb')
+        print("GeoIP databases initialized successfully")
+        return True
+
+    except Exception as e:
+        print(f"Error opening MaxMind databases: {e}")
+        city_reader = None
+        asn_reader = None
+        country_reader = None
+        return False
+
+# Initialize readers
+initialize_geoip_readers()
 
 def get_ip_info(ip_address: str) -> dict:
     """

@@ -44,3 +44,6 @@ docker-compose.override.yml
 
 # Environment variables
 .env
+
+# downloaded db
+geoip_db
