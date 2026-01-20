@@ -33,16 +33,22 @@
     // Simple check for IPv4 address
     const ipRegex = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/;
 
+    // Simple check for email address
+    const emailRegex = /^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
+
     function isValidTarget(text) {
         // Trim whitespace and check against regex patterns
         const trimmed = text.trim();
         if (!trimmed) return null;
 
-        // Check if the trimmed text is a valid domain or IP
+        // Check if the trimmed text is an email, domain, or IP
+        const isEmail = emailRegex.test(trimmed);
         const isDomain = domainRegex.test(trimmed);
         const isIP = ipRegex.test(trimmed);
 
-        if (isDomain) {
+        if (isEmail) {
+            return { type: 'email', value: trimmed };
+        } else if (isDomain) {
             return { type: 'domain', value: trimmed };
         } else if (isIP) {
             return { type: 'ip', value: trimmed };
@@ -259,6 +265,21 @@
     }
 
     function generateContentHTML(data) {
+        // Handle email addresses
+        if (data.isEmail) {
+            return `
+                <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
+                    <span style="background-color: #17a2b8; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: bold;">EMAIL ADDRESS</span>
+                    <div style="font-size: 11px; color: #aaa;">Search WHMCS</div>
+                </div>
+                <div style="border-left: 3px solid #17a2b8; padding-left: 10px; margin-bottom: 15px;">
+                    <h4 style="margin: 0 0 5px 0; color: #4dcfff; font-size: 14px;">Email Information</h4>
+                    <p style="margin: 3px 0; color: #ccc;">DNS records not available for email addresses.</p>
+                    <p style="margin: 3px 0; color: #ccc;">Check the WHMCS tab for search results.</p>
+                </div>
+            `;
+        }
+
         const typeBadge = data.isDomain ? '<span style="background-color: #28a745; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: bold;">DOMAIN</span>' : '<span style="background-color: #ffc107; color: #333; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: bold;">IP ADDRESS</span>';
 
         let ipInfoHtml = '';
@@ -557,6 +578,24 @@
     }
 
     function fetchDNSInfo(target) {
+        // For email addresses, skip DNS lookup and show email info instead
+        if (target.type === 'email') {
+            showPanel(target, {
+                isDomain: false,
+                isEmail: true,
+                ip_geo_details: [],
+                a_records: [],
+                ip_address: 'N/A',
+                ip_provider: 'N/A',
+                ip_location: 'N/A',
+                ns: [],
+                mx: [],
+                cname: [],
+                spf: []
+            }, null);
+            return;
+        }
+
         // Show loading state immediately
         showPanel(target, {
             isDomain: target.type === 'domain',
