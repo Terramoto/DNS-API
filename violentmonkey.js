@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Domain/IP/WHMCS Information Lookup
 // @namespace    http://terramoto.xyz/
-// @version      2.5
+// @version      2.6
 // @description  Detects selected domains or IPs and displays a floating panel with DNS and GeoIP information using an external API.
 // @author       Terramoto
 // @match        *://*/*
@@ -31,6 +31,9 @@
     const WHMCS_API_URL = `${WHMCS_ROOT}search/intellisearch`;
     const WHMCS_CACHE_PREFIX = 'domain-info-whmcs-email:';
     const WHMCS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+    const WHMCS_CACHE_SCHEMA_VERSION = 2;
+    const WHMCS_CPANEL_LOGIN_HASH = '#gm-login-cpanel';
+    const WHMCS_SERVICE_FETCH_CONCURRENCY = 3;
     const DKIM_SELECTORS = ['default', 'selector1', 'selector2', 'google'];
     let lookupPanel = null;
     let activeTab = 'dns';
@@ -71,6 +74,32 @@
         return null;
     }
 
+    function escapeHTML(value) {
+        return String(value ?? '')
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#039;');
+    }
+
+    function positiveInteger(value) {
+        const parsed = Number.parseInt(String(value), 10);
+        return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+    }
+
+    function clientServiceUrl(clientId, serviceId = null, cpanelLogin = false) {
+        const client = positiveInteger(clientId);
+        const service = positiveInteger(serviceId);
+        if (!client) return '';
+
+        const url = new URL('clientsservices.php', WHMCS_ROOT || window.location.href);
+        url.searchParams.set('userid', String(client));
+        if (service) url.searchParams.set('productselect', String(service));
+        if (cpanelLogin) url.hash = WHMCS_CPANEL_LOGIN_HASH;
+        return url.href;
+    }
+
     function gmGetValue(key, defaultValue) {
         if (typeof GM !== 'undefined' && GM.getValue) return GM.getValue(key, defaultValue);
         if (typeof GM_getValue !== 'undefined') return Promise.resolve(GM_getValue(key, defaultValue));
@@ -96,7 +125,8 @@
     async function getCachedWHMCS(email) {
         const key = emailCacheKey(email);
         const cached = await gmGetValue(key, null);
-        if (!cached || !cached.expiresAt || cached.expiresAt <= Date.now()) {
+        if (!cached || cached.schemaVersion !== WHMCS_CACHE_SCHEMA_VERSION ||
+            !cached.expiresAt || cached.expiresAt <= Date.now()) {
             if (cached) await gmDeleteValue(key);
             return null;
         }
@@ -105,6 +135,7 @@
 
     async function cacheWHMCS(email, data) {
         await gmSetValue(emailCacheKey(email), {
+            schemaVersion: WHMCS_CACHE_SCHEMA_VERSION,
             data,
             cachedAt: Date.now(),
             expiresAt: Date.now() + WHMCS_CACHE_TTL_MS
@@ -479,7 +510,7 @@
         const totalResults = (data.client?.length || 0) + (data.contact?.length || 0) +
             (data.service?.length || 0) + (data.domain?.length || 0) +
             (data.invoice?.length || 0) + (data.ticket?.length || 0) +
-            (data.other?.length || 0);
+            (data.other?.length || 0) + (data.client_service?.length || 0);
 
         if (totalResults === 0) {
             return `
@@ -498,6 +529,16 @@
 
         if (data.client && data.client.length > 0) {
             html += generateWHMCSSection('Clients', data.client, 'client');
+        }
+        if (data.client_service && data.client_service.length > 0) {
+            html += generateWHMCSSection('Client Products/Services', data.client_service, 'service');
+        }
+        if (data.client_service_error) {
+            html += `
+                <div style="margin: 10px 0; padding: 8px; color: #f0ad4e; background: #493d24; border-radius: 4px; font-size: 11px;">
+                    Products/services could not be loaded: ${escapeHTML(data.client_service_error)}
+                </div>
+            `;
         }
         if (data.domain && data.domain.length > 0) {
             html += generateWHMCSSection('Domains', data.domain, 'domain');
@@ -542,7 +583,7 @@
 
         if (item.status) {
             const statusColor = getStatusColor(item.status);
-            statusBadge = `<span style="background-color: ${statusColor}; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; color: white;">${item.status.toUpperCase()}</span>`;
+            statusBadge = `<span style="background-color: ${statusColor}; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; color: white;">${escapeHTML(String(item.status).toUpperCase())}</span>`;
         }
 
         // Generate URL based on item type
@@ -553,7 +594,7 @@
             itemUrl = `${WHMCS_ROOT}clientsdomains.php?userid=${item.user_id}&id=${item.id}`
         }
         if (type == 'service' && item.user_id && item.id) {
-            itemUrl = `${WHMCS_ROOT}clientsservices.php?userid=${item.user_id}&productselect=${item.id}`
+            itemUrl = clientServiceUrl(item.user_id, item.id);
         }
         if (type == 'contact' && item.user_id && item.id) {
             itemUrl = `${WHMCS_ROOT}clientscontacts.php?userid=${item.user_id}&id=${item.id}`;
@@ -589,16 +630,20 @@
                 break;
 
             case 'service':
+                const cpanelLoginUrl = item.cpanel_login_available && String(item.status).toLowerCase() === 'active'
+                    ? clientServiceUrl(item.user_id, item.id, true)
+                    : '';
                 cardContent = `
                     <div style="margin-bottom: 5px;">
-                        <strong style="color: #fff;">${item.product_name || 'N/A'}</strong> ${statusBadge}
+                        <strong style="color: #fff;">${escapeHTML(item.product_name || 'N/A')}</strong> ${statusBadge}
                     </div>
                     <div style="font-size: 12px; color: #ccc;">
-                        ${item.domain ? `<div>Domain: ${item.domain}</div>` : ''}
-                        ${item.client_name ? `<div>Client: ${item.client_name}</div>` : ''}
-                        ${item.client_company_name ? `<div>Company: ${item.client_company_name}</div>` : ''}
-                        ${item.id ? `<div>ID: ${item.id}</div>` : ''}
+                        ${item.domain ? `<div>Domain: ${escapeHTML(item.domain)}</div>` : ''}
+                        ${item.client_name ? `<div>Client: ${escapeHTML(item.client_name)}</div>` : ''}
+                        ${item.client_company_name ? `<div>Company: ${escapeHTML(item.client_company_name)}</div>` : ''}
+                        ${item.id ? `<div>ID: ${escapeHTML(item.id)}</div>` : ''}
                         ${itemUrl ? `<div style="margin-top: 5px;"><a href="${itemUrl}" target="_blank" style="color: #4dcfff; text-decoration: none; font-size: 11px;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Open in WHMCS \u2192</a></div>` : ''}
+                        ${cpanelLoginUrl ? `<div style="margin-top: 8px;"><a href="${cpanelLoginUrl}" target="_blank" rel="noopener" style="display: inline-block; padding: 5px 9px; border-radius: 4px; background: #f39c12; color: #fff; text-decoration: none; font-size: 11px; font-weight: bold;">Login to cPanel</a></div>` : ''}
                     </div>
                 `;
                 break;
@@ -637,6 +682,234 @@
                 <div style="font-size: 14px;">${message}</div>
             </div>
         `;
+    }
+
+    function selectedOptionText(select) {
+        if (!select) return '';
+        const selected = Array.from(select.options || []).find(option => option.selected);
+        return selected ? selected.textContent.trim() : '';
+    }
+
+    function fieldValue(documentNode, selectors) {
+        for (const selector of selectors) {
+            const field = documentNode.querySelector(selector);
+            if (!field) continue;
+            if (field.tagName === 'SELECT') {
+                return selectedOptionText(field) || field.value || '';
+            }
+            if (typeof field.value === 'string') return field.value.trim();
+        }
+        return '';
+    }
+
+    function isCpanelLoginControl(element) {
+        const label = [
+            element.textContent,
+            element.getAttribute('value'),
+            element.getAttribute('title'),
+            element.getAttribute('aria-label')
+        ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+        return /(?:log\s*in|login|sign\s*in).*cpanel|cpanel.*(?:log\s*in|login|sign\s*in)/i.test(label);
+    }
+
+    function findCpanelLoginControl(documentNode = document) {
+        return Array.from(documentNode.querySelectorAll('button, input[type="submit"], input[type="button"], a'))
+            .find(isCpanelLoginControl) || null;
+    }
+
+    function serviceStatusFromLabel(label) {
+        const match = String(label).match(/\b(Active|Pending|Suspended|Terminated|Cancelled|Canceled|Fraud)\b/i);
+        if (!match) return '';
+        const status = match[1].toLowerCase();
+        return status === 'canceled' ? 'Cancelled' : status.charAt(0).toUpperCase() + status.slice(1);
+    }
+
+    function cleanServiceLabel(label) {
+        return String(label)
+            .replace(/\s*[\[(]\s*(?:Active|Pending|Suspended|Terminated|Cancelled|Canceled|Fraud)\s*[\])]/ig, '')
+            .trim();
+    }
+
+    function discoverServiceOptions(documentNode, html) {
+        const services = new Map();
+        const selectors = documentNode.querySelectorAll(
+            'select[name="productselect"], select#productselect, select[onchange*="productselect"], select[onchange*="clientsservices"]'
+        );
+
+        selectors.forEach(select => {
+            Array.from(select.options || []).forEach(option => {
+                const id = positiveInteger(option.value);
+                if (!id) return;
+                const label = option.textContent.replace(/\s+/g, ' ').trim();
+                services.set(id, {
+                    id,
+                    label: cleanServiceLabel(label),
+                    status: serviceStatusFromLabel(label),
+                    selected: option.selected
+                });
+            });
+        });
+
+        documentNode.querySelectorAll('a[href*="clientsservices.php"]').forEach(link => {
+            try {
+                const url = new URL(link.getAttribute('href'), WHMCS_ROOT);
+                const id = positiveInteger(url.searchParams.get('productselect'));
+                if (!id || services.has(id)) return;
+                const label = link.textContent.replace(/\s+/g, ' ').trim();
+                services.set(id, { id, label: cleanServiceLabel(label), status: serviceStatusFromLabel(label) });
+            } catch (error) {
+                console.debug('[WHMCS] Ignoring an invalid service link', error);
+            }
+        });
+
+        // Blend 7.x can construct the selector URL in inline JavaScript rather than an anchor.
+        for (const match of html.matchAll(/[?&]productselect=(\d+)/g)) {
+            const id = positiveInteger(match[1]);
+            if (id && !services.has(id)) services.set(id, { id, label: '', status: '' });
+        }
+
+        return services;
+    }
+
+    function parseServiceDetails(documentNode, fallback = {}) {
+        const status = fieldValue(documentNode, [
+            'select[name="domainstatus"]',
+            'select[name="status"]',
+            'input[name="domainstatus"]'
+        ]) || fallback.status || '';
+        const productName = fieldValue(documentNode, [
+            'select[name="packageid"]',
+            'select[name="pid"]',
+            'input[name="productname"]'
+        ]) || fallback.label || 'Hosting service';
+        const domain = fieldValue(documentNode, [
+            'input[name="domain"]',
+            'input#domain'
+        ]);
+
+        return {
+            product_name: productName,
+            domain,
+            status,
+            cpanel_login_available: Boolean(findCpanelLoginControl(documentNode))
+        };
+    }
+
+    function requestWHMCSPage(url) {
+        return new Promise((resolve, reject) => {
+            GM_XHR({
+                method: 'GET',
+                url,
+                timeout: 30000,
+                onload(response) {
+                    if (response.status < 200 || response.status >= 300) {
+                        reject(new Error(`HTTP ${response.status}`));
+                        return;
+                    }
+                    resolve(response.responseText);
+                },
+                onerror() {
+                    reject(new Error('Network error'));
+                },
+                ontimeout() {
+                    reject(new Error('Request timed out'));
+                }
+            });
+        });
+    }
+
+    async function mapWithConcurrency(items, concurrency, mapper) {
+        const results = new Array(items.length);
+        let nextIndex = 0;
+
+        async function worker() {
+            while (nextIndex < items.length) {
+                const index = nextIndex++;
+                results[index] = await mapper(items[index], index);
+            }
+        }
+
+        const workerCount = Math.min(concurrency, items.length);
+        await Promise.all(Array.from({ length: workerCount }, () => worker()));
+        return results;
+    }
+
+    function matchingClientIds(data, email) {
+        const normalizedEmail = String(email).trim().toLowerCase();
+        return [...new Set((data.client || [])
+            .filter(client => String(client.email || '').trim().toLowerCase() === normalizedEmail)
+            .map(client => positiveInteger(client.id))
+            .filter(Boolean))];
+    }
+
+    async function fetchClientServices(clientId) {
+        const listUrl = clientServiceUrl(clientId);
+        const listHtml = await requestWHMCSPage(listUrl);
+        const parser = new DOMParser();
+        const listDocument = parser.parseFromString(listHtml, 'text/html');
+        const discovered = discoverServiceOptions(listDocument, listHtml);
+
+        if (discovered.size === 0) return [];
+
+        const serviceOptions = Array.from(discovered.values());
+        return mapWithConcurrency(serviceOptions, WHMCS_SERVICE_FETCH_CONCURRENCY, async option => {
+            let serviceDocument = listDocument;
+            // The initially selected service is already represented by the list response.
+            if (!option.selected || serviceOptions.length === 1) {
+                try {
+                    const html = await requestWHMCSPage(clientServiceUrl(clientId, option.id));
+                    serviceDocument = parser.parseFromString(html, 'text/html');
+                } catch (error) {
+                    console.warn(`[WHMCS] Could not load service ${option.id}:`, error);
+                }
+            }
+            return {
+                id: option.id,
+                user_id: clientId,
+                ...parseServiceDetails(serviceDocument, option)
+            };
+        });
+    }
+
+    async function enrichEmailSearchWithServices(data, email) {
+        const clientIds = matchingClientIds(data, email);
+        if (clientIds.length === 0) return data;
+
+        try {
+            const serviceResults = await Promise.allSettled(clientIds.map(fetchClientServices));
+            data.client_service = serviceResults
+                .filter(result => result.status === 'fulfilled')
+                .flatMap(result => result.value);
+            const failed = serviceResults.filter(result => result.status === 'rejected');
+            if (failed.length > 0) {
+                data.client_service_error = `${failed.length} client service list(s) could not be loaded`;
+            }
+        } catch (error) {
+            console.error('[WHMCS] Failed to retrieve client products/services:', error);
+            data.client_service_error = error.message || 'Unknown error';
+        }
+        return data;
+    }
+
+    function handleCpanelLoginPage() {
+        if (window.location.hash !== WHMCS_CPANEL_LOGIN_HASH || !/\/clientsservices\.php$/i.test(window.location.pathname)) {
+            return;
+        }
+
+        // Remove the one-shot marker before activating WHMCS's own module command.
+        history.replaceState(null, document.title, window.location.pathname + window.location.search);
+        let attempts = 0;
+        const activateNativeCommand = window.setInterval(() => {
+            attempts += 1;
+            const control = findCpanelLoginControl(document);
+            if (control) {
+                window.clearInterval(activateNativeCommand);
+                control.click();
+            } else if (attempts >= 40) {
+                window.clearInterval(activateNativeCommand);
+                console.error('[WHMCS] The native Login to cPanel command was not found on this service.');
+            }
+        }, 250);
     }
 
     // --- API Fetching Logic (using GM_xmlHttpRequest) ---
@@ -865,7 +1138,11 @@
                 if (lookupId !== currentLookupId) return;
                 try {
                     if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`);
-                    const data = JSON.parse(response.responseText);
+                    let data = JSON.parse(response.responseText);
+                    if (target.type === 'email') {
+                        data = await enrichEmailSearchWithServices(data, target.value);
+                    }
+                    if (lookupId !== currentLookupId) return;
                     if (target.type === 'email') await cacheWHMCS(target.value, data);
                     if (lookupId !== currentLookupId) return;
                     renderWHMCSData(data, target);
@@ -958,6 +1235,10 @@
             isPanelActive = false;
         }
     });
+
+    // A cPanel button in the lookup panel opens the native WHMCS service page with a
+    // one-shot hash. On that page, activate the module's own authenticated command.
+    handleCpanelLoginPage();
 
     // Initialize the panel element
     createPanel();

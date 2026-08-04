@@ -10,6 +10,11 @@ A Violentmonkey userscript is available that allows you to select domains or IPs
 The userscript can also search the configured WHMCS staff interface. Searches made with a
 client email address are cached in Violentmonkey's private storage for seven days. Cached
 results include a **Refresh** action to bypass the cache and replace the saved entry.
+For an exact client email match, the script also reads that client's products from the
+WHMCS 7.x `clientsservices.php` staff page and displays their current status. Active
+hosting services expose **Login to cPanel** only when WHMCS provides the native cPanel
+module command; clicking it opens the service page and activates that authenticated
+WHMCS command without storing hosting or WHMCS API credentials in the userscript.
 
 Before installing the userscript, set `WHMCS_ROOT`, `API_URL`, and the matching userscript
 `@connect` host entries in `violentmonkey.js`. Common DKIM selectors can be configured in
