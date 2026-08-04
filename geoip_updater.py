@@ -1,18 +1,20 @@
 import os
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 import requests
-import tempfile
 import shutil
+from pathlib import Path
+
+GEOIP_DIRECTORY = Path(os.getenv("GEOIP_DB_DIR", Path(__file__).resolve().parent / "geoip_db"))
 
 def ensure_geoip_directory_exists():
     """
     Ensure the geoip_db directory exists, create it if it doesn't.
     """
-    if not os.path.exists("geoip_db"):
+    if not GEOIP_DIRECTORY.exists():
         try:
-            os.makedirs("geoip_db")
+            GEOIP_DIRECTORY.mkdir(parents=True, exist_ok=True)
             print("Created geoip_db directory")
         except Exception as e:
             print(f"Error creating geoip_db directory: {e}")
@@ -44,14 +46,13 @@ def download_file(url, destination):
     """
     Download a file from URL to destination with error handling.
     """
+    temp_file = destination + ".tmp"
     try:
         print(f"Downloading {url}...")
         response = requests.get(url, stream=True, timeout=30)
         response.raise_for_status()
 
         # Create temp file first
-        temp_file = destination + ".tmp"
-
         with open(temp_file, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
@@ -83,17 +84,17 @@ def update_geoip_databases():
         {
             "url": "https://git.io/GeoLite2-ASN.mmdb",
             "filename": "GeoLite2-ASN.mmdb",
-            "path": "geoip_db/GeoLite2-ASN.mmdb"
+            "path": str(GEOIP_DIRECTORY / "GeoLite2-ASN.mmdb")
         },
         {
             "url": "https://git.io/GeoLite2-City.mmdb",
             "filename": "GeoLite2-City.mmdb",
-            "path": "geoip_db/GeoLite2-City.mmdb"
+            "path": str(GEOIP_DIRECTORY / "GeoLite2-City.mmdb")
         },
         {
             "url": "https://git.io/GeoLite2-Country.mmdb",
             "filename": "GeoLite2-Country.mmdb",
-            "path": "geoip_db/GeoLite2-Country.mmdb"
+            "path": str(GEOIP_DIRECTORY / "GeoLite2-Country.mmdb")
         }
     ]
 
@@ -114,14 +115,16 @@ def update_geoip_databases():
 
     return updated_any
 
-def start_background_updater(interval_hours=24):
+def start_background_updater(interval_hours=24, on_update=None):
     """
     Start a background thread that periodically checks and updates GeoIP databases.
     """
     def updater_loop():
         while True:
             try:
-                update_geoip_databases()
+                updated = update_geoip_databases()
+                if updated and on_update:
+                    on_update()
             except Exception as e:
                 print(f"Error in GeoIP updater: {e}")
 

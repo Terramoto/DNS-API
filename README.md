@@ -7,20 +7,35 @@ I did this for IT work, it helps find domains details without having to go to ot
 
 A Violentmonkey userscript is available that allows you to select domains or IPs on any webpage and retrieve DNS information through this API service.
 
+The userscript can also search the configured WHMCS staff interface. Searches made with a
+client email address are cached in Violentmonkey's private storage for seven days. Cached
+results include a **Refresh** action to bypass the cache and replace the saved entry.
+
+Before installing the userscript, set `WHMCS_ROOT`, `API_URL`, and the matching userscript
+`@connect` host entries in `violentmonkey.js`. Common DKIM selectors can be configured in
+the `DKIM_SELECTORS` constant.
+
 ## Features
 
 This API provides lookup capabilities for:
 - Nameservers (NS records) with IP addresses
 - MX records (Mail exchange) with IP addresses
 - A records (IPv4 addresses) with provider and location information
+- AAAA records (IPv6 addresses) with provider and location information
 - TXT records
 - www CNAME record with IP addresses
 - IP provider and location information for all IP addresses
 - PTR record for the A record IP
+- CAA and SOA records
+- SPF and DMARC diagnostics
+- DKIM discovery for configurable selectors
+- MTA-STS and SMTP TLS reporting records
+- DNSSEC DS/DNSKEY presence status
+- Warnings for missing/duplicate mail policies and unresolved MX targets
 
 ## Requirements
 
-- Python 3.7+
+- Python 3.9+
 - FastAPI
 - dnspython
 - requests
@@ -50,12 +65,13 @@ This API provides lookup capabilities for:
 
 Returns a welcome message and basic API information.
 
-### GET /dns-lookup/{domain}
+### GET /dns-lookup/{domain_or_ip}
 
-Retrieves all DNS records for the specified domain.
+Retrieves DNS records and mail diagnostics for a domain, or GeoIP/PTR information for an IP.
 
 **Path Parameters:**
-- `domain` (string, required): The domain name to look up
+- `domain_or_ip` (string, required): Domain name, IPv4 address, or IPv6 address
+- `dkim_selectors` (query string, optional): Comma-separated DKIM selectors, maximum 10
 
 **Response:**
 ```json
@@ -105,7 +121,18 @@ Retrieves all DNS records for the specified domain.
 
 ## Error Handling
 
-The API will return appropriate HTTP status codes and error messages for invalid domains or DNS lookup failures.
+The API returns a validation error for invalid targets and reserves HTTP 500 for unexpected server failures.
+
+Individual DNS lookup failures are also returned in `records.lookup_errors`, allowing a
+client to distinguish missing records from timeouts, NXDOMAIN, and resolver failures.
+
+## Development checks
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+node --check violentmonkey.js
+```
 
 ## Implementation Details
 

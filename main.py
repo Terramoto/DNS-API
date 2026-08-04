@@ -1,143 +1,180 @@
-from fastapi import FastAPI, HTTPException
-from typing import Dict, List, Optional
-import dns.resolver
-import requests
+import asyncio
 import ipaddress
+import re
+from contextlib import asynccontextmanager
+from typing import Any, Dict, Iterable, Optional, Union
 
-from dns_lookup import get_dns_records, get_domain_ips, get_ptr_record
-from ip_info import get_ip_info
-from geoip_updater import start_background_updater
+from fastapi import FastAPI, HTTPException, Query
+
+from dns_lookup import DEFAULT_DKIM_SELECTORS, get_dns_records, get_domain_ips, get_ptr_record
+from geoip_updater import start_background_updater, update_geoip_databases
+from ip_info import get_ip_info, initialize_geoip_readers
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await asyncio.to_thread(update_geoip_databases)
+    initialize_geoip_readers()
+    start_background_updater(interval_hours=24, on_update=initialize_geoip_readers)
+    yield
+
 
 app = FastAPI(
     title="DNS Lookup API",
-    description="API for retrieving DNS records and IP geolocation information",
-    version="1.0.0"
+    description="API for retrieving DNS, mail-security, and IP geolocation information",
+    version="1.1.0",
+    lifespan=lifespan,
 )
 
-# Start background GeoIP updater thread
-start_background_updater(interval_hours=24)
+
+IPAddress = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
+
+
+def _normalize_target(value: str) -> tuple[str, Optional[IPAddress]]:
+    value = value.strip().rstrip(".")
+    try:
+        address = ipaddress.ip_address(value)
+        return str(address), address
+    except ValueError:
+        pass
+
+    try:
+        ascii_domain = value.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise HTTPException(status_code=422, detail="Invalid internationalized domain") from exc
+
+    if len(ascii_domain) > 253 or not ascii_domain or "." not in ascii_domain:
+        raise HTTPException(status_code=422, detail="Invalid domain")
+    labels = ascii_domain.split(".")
+    if any(
+        len(label) > 63
+        or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+        for label in labels
+    ):
+        raise HTTPException(status_code=422, detail="Invalid domain")
+    return ascii_domain, None
+
+
+def _parse_selectors(value: Optional[str]) -> Iterable[str]:
+    if not value:
+        return DEFAULT_DKIM_SELECTORS
+    selectors = [selector.strip().lower() for selector in value.split(",") if selector.strip()]
+    if len(selectors) > 10 or any(
+        not re.fullmatch(r"[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?", selector)
+        for selector in selectors
+    ):
+        raise HTTPException(status_code=422, detail="Invalid DKIM selectors")
+    return selectors
+
+
+def _empty_ip_info(ip: str, ptr: Optional[str], provider: str, location: str) -> Dict[str, Any]:
+    return {
+        "ip": ip,
+        "ptr": ptr,
+        "provider": provider,
+        "location": location,
+        "coordinates": {"latitude": None, "longitude": None},
+    }
+
+
+async def _enrich_ip(ip: str, include_ptr: bool = False) -> Dict[str, Any]:
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return _empty_ip_info(ip, None, "Invalid IP", "N/A")
+
+    ptr_record = await get_ptr_record(ip) if include_ptr else None
+    info = get_ip_info(ip)
+    if "error" in info:
+        return _empty_ip_info(ip, ptr_record, "Unknown", "Unknown")
+
+    coordinates = info.get("coordinates", "Unknown,Unknown")
+    latitude, longitude = coordinates.split(",", 1) if "," in coordinates else (None, None)
+    return {
+        "ip": ip,
+        "ptr": ptr_record,
+        "provider": info.get("org", "Unknown"),
+        "location": f"{info.get('city', 'Unknown')}, {info.get('region', 'Unknown')}, {info.get('country', 'Unknown')}",
+        "coordinates": {
+            "latitude": None if latitude == "Unknown" else latitude,
+            "longitude": None if longitude == "Unknown" else longitude,
+        },
+    }
+
+
+def _ip_only_records(address: IPAddress) -> Dict[str, Any]:
+    return {
+        "NS": [], "MX": [], "A": [str(address)] if address.version == 4 else [],
+        "AAAA": [str(address)] if address.version == 6 else [], "TXT": [],
+        "CNAME_WWW": [], "CAA": [], "SOA": None, "DMARC": [], "MTA_STS": [],
+        "TLS_RPT": [], "DKIM": {},
+        "DNSSEC": {"status": "not_applicable", "dnskey_present": False, "ds_present": False,
+                   "note": "DNSSEC is not applicable to a direct IP lookup."},
+        "lookup_errors": {}, "diagnostics": [],
+    }
+
 
 @app.get("/")
-async def root():
-    return {"message": "DNS Lookup API is running. Use /dns-lookup/{domain} to get DNS information."}
+async def root() -> Dict[str, str]:
+    return {"message": "DNS Lookup API is running. Use /dns-lookup/{domain_or_ip}."}
 
-@app.get("/dns-lookup/{domain}")
-async def dns_lookup(domain: str) -> Dict:
-    """
-    Retrieve DNS records for a domain including nameservers, MX, A, TXT records,
-    www CNAME, and IP provider/location information for A records.
-    """
+
+@app.get("/dns-lookup/{target}")
+async def dns_lookup(
+    target: str,
+    dkim_selectors: Optional[str] = Query(
+        default=None,
+        description="Comma-separated DKIM selectors (maximum 10)",
+    ),
+) -> Dict[str, Any]:
+    """Retrieve DNS/mail diagnostics for a domain or GeoIP/PTR data for an IP."""
+    normalized, address = _normalize_target(target)
+
     try:
-        records = await get_dns_records(domain)
-        
-        # Add IP geolocation information for A records
-        if "A" in records and records["A"]:
-            ip_info_list = []
+        records = (
+            _ip_only_records(address)
+            if address is not None
+            else await get_dns_records(normalized, _parse_selectors(dkim_selectors))
+        )
 
-            for ip in records["A"]:
-                try:
-                    # Validate IP address
-                    ipaddress.ip_address(ip)
-                    ip_info = get_ip_info(ip)
-                    # Get PTR record for the IP
-                    ptr_record = await get_ptr_record(ip)
-                    # Handle potential errors from MaxMind
-                    if "error" in ip_info:
-                        ip_info_list.append({
-                            "ip": ip,
-                            "ptr": ptr_record,
-                            "provider": "Unknown",
-                            "location": "Unknown",
-                            "coordinates": {"latitude": None, "longitude": None}
-                        })
-                    else:
-                        # Parse coordinates
-                        coords = ip_info.get("coordinates", "Unknown,Unknown")
-                        lat, lon = coords.split(",") if "," in coords else (None, None)
-                        ip_info_list.append({
-                            "ip": ip,
-                            "ptr": ptr_record,
-                            "provider": ip_info.get("org", "Unknown"),
-                            "location": f"{ip_info.get('city', 'Unknown')}, {ip_info.get('region', 'Unknown')}, {ip_info.get('country', 'Unknown')}",
-                            "coordinates": {
-                                "latitude": lat if lat != "Unknown" else None,
-                                "longitude": lon if lon != "Unknown" else None
-                            }
-                        })
-                except ValueError:
-                    # Not a valid IP address
-                    ip_info_list.append({
-                        "ip": ip,
-                        "ptr": None,
-                        "provider": "Invalid IP",
-                        "location": "N/A",
-                        "coordinates": {"latitude": None, "longitude": None}
-                    })
+        a_info, aaaa_info = await asyncio.gather(
+            asyncio.gather(*(_enrich_ip(ip, include_ptr=True) for ip in records["A"])),
+            asyncio.gather(*(_enrich_ip(ip, include_ptr=True) for ip in records["AAAA"])),
+        )
+        records["A_IP_Info"] = list(a_info)
+        records["AAAA_IP_Info"] = list(aaaa_info)
 
-            records["A_IP_Info"] = ip_info_list
-        else:
-            records["A_IP_Info"] = []
-            
-        # Add IP information for MX records
-        if "MX" in records and records["MX"]:
-            for mx_record in records["MX"]:
-                mx_domain = mx_record["mail_server"].rstrip('.')
-                mx_ips = await get_domain_ips(mx_domain)
-                mx_record["ips"] = mx_ips
-                # Add IP geolocation info for MX record IPs
-                mx_ip_info_list = []
-                for ip in mx_ips:
-                    try:
-                        ipaddress.ip_address(ip)
-                        ip_info = get_ip_info(ip)
-                        # Handle potential errors from MaxMind
-                        if "error" in ip_info:
-                            mx_ip_info_list.append({
-                                "ip": ip,
-                                "provider": "Unknown",
-                                "location": "Unknown",
-                                "coordinates": {"latitude": None, "longitude": None}
-                            })
-                        else:
-                            # Parse coordinates
-                            coords = ip_info.get("coordinates", "Unknown,Unknown")
-                            lat, lon = coords.split(",") if "," in coords else (None, None)
-                        mx_ip_info_list.append({
-                            "ip": ip,
-                            "provider": ip_info.get("org", "Unknown"),
-                            "location": f"{ip_info.get('city', 'Unknown')}, {ip_info.get('region', 'Unknown')}, {ip_info.get('country', 'Unknown')}",
-                            "coordinates": {
-                                "latitude": lat if lat != "Unknown" else None,
-                                "longitude": lon if lon != "Unknown" else None
-                            }
-                        })
-                    except ValueError:
-                        mx_ip_info_list.append({
-                            "ip": ip,
-                            "provider": "Invalid IP",
-                            "location": "N/A",
-                            "coordinates": {"latitude": None, "longitude": None}
-                        })
-                    mx_record["ip_info"] = mx_ip_info_list
-        else:
-            records["MX"] = []
-        
-        # Add IP information for CNAME_WWW records
-        if "CNAME_WWW" in records and records["CNAME_WWW"]:
-            cname_with_ips = []
-            for cname in records["CNAME_WWW"]:
-                cname_domain = cname.rstrip('.')
-                cname_ips = await get_domain_ips(cname_domain)
-                cname_with_ips.append({
-                    "cname": cname,
-                    "ips": cname_ips
+        for mx_record in records["MX"]:
+            mx_domain = mx_record["mail_server"].rstrip(".")
+            mx_ips = [] if not mx_domain else await get_domain_ips(mx_domain)
+            mx_record["ips"] = mx_ips
+            mx_record["ip_info"] = list(
+                await asyncio.gather(*(_enrich_ip(ip) for ip in mx_ips))
+            )
+            if mx_domain and not mx_ips:
+                records["diagnostics"].append({
+                    "severity": "error",
+                    "code": "unresolved_mx",
+                    "message": f"MX target {mx_domain} has no A or AAAA address.",
                 })
-            records["CNAME_WWW"] = cname_with_ips
-        
-        return {"domain": domain, "records": records}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error retrieving DNS records: {str(e)}")
+
+        cname_records = records["CNAME_WWW"]
+        cname_ips = await asyncio.gather(
+            *(get_domain_ips(cname.rstrip(".")) for cname in cname_records)
+        )
+        records["CNAME_WWW"] = [
+            {"cname": cname, "ips": ips}
+            for cname, ips in zip(cname_records, cname_ips)
+        ]
+
+        return {"domain": normalized, "records": records}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Error retrieving DNS records") from exc
+
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

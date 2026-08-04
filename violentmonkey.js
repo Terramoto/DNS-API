@@ -7,8 +7,15 @@
 // @match        *://*/*
 // @grant        GM.xmlHttpRequest
 // @grant        GM_xmlHttpRequest
+// @grant        GM.getValue
+// @grant        GM.setValue
+// @grant        GM.deleteValue
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
 // @connect      localhost:8000
 // @connect      127.0.0.1:8000
+// @connect      dns.terramoto.xyz
 // @connect      your.domain.here
 // @run-at       document-end
 // ==/UserScript==
@@ -22,9 +29,12 @@
     // Fill in with your WHMCS staff base url
     const WHMCS_ROOT = '';
     const WHMCS_API_URL = `${WHMCS_ROOT}search/intellisearch`;
+    const WHMCS_CACHE_PREFIX = 'domain-info-whmcs-email:';
+    const WHMCS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+    const DKIM_SELECTORS = ['default', 'selector1', 'selector2', 'google'];
     let lookupPanel = null;
     let activeTab = 'dns';
-    let whmcsToken = null;
+    let currentLookupId = 0;
 
     // --- Utility Functions ---
     // Simple check for valid domain name (RFC 1035 format, not perfect but good enough)
@@ -32,6 +42,7 @@
 
     // Simple check for IPv4 address
     const ipRegex = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/;
+    const ipv6Regex = /^(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}$/i;
 
     // Simple check for email address
     const emailRegex = /^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
@@ -44,16 +55,60 @@
         // Check if the trimmed text is an email, domain, or IP
         const isEmail = emailRegex.test(trimmed);
         const isDomain = domainRegex.test(trimmed);
-        const isIP = ipRegex.test(trimmed);
+        const isIP = ipRegex.test(trimmed) || ipv6Regex.test(trimmed);
 
         if (isEmail) {
             return { type: 'email', value: trimmed };
+        } else if (isIP) {
+            if (trimmed.includes('.')) {
+                const octets = trimmed.split('.').map(Number);
+                if (octets.some(octet => octet > 255)) return null;
+            }
+            return { type: 'ip', value: trimmed };
         } else if (isDomain) {
             return { type: 'domain', value: trimmed };
-        } else if (isIP) {
-            return { type: 'ip', value: trimmed };
         }
         return null;
+    }
+
+    function gmGetValue(key, defaultValue) {
+        if (typeof GM !== 'undefined' && GM.getValue) return GM.getValue(key, defaultValue);
+        if (typeof GM_getValue !== 'undefined') return Promise.resolve(GM_getValue(key, defaultValue));
+        return Promise.resolve(defaultValue);
+    }
+
+    function gmSetValue(key, value) {
+        if (typeof GM !== 'undefined' && GM.setValue) return GM.setValue(key, value);
+        if (typeof GM_setValue !== 'undefined') GM_setValue(key, value);
+        return Promise.resolve();
+    }
+
+    function gmDeleteValue(key) {
+        if (typeof GM !== 'undefined' && GM.deleteValue) return GM.deleteValue(key);
+        if (typeof GM_deleteValue !== 'undefined') GM_deleteValue(key);
+        return Promise.resolve();
+    }
+
+    function emailCacheKey(email) {
+        return WHMCS_CACHE_PREFIX + email.trim().toLowerCase();
+    }
+
+    async function getCachedWHMCS(email) {
+        const key = emailCacheKey(email);
+        const cached = await gmGetValue(key, null);
+        if (!cached || !cached.expiresAt || cached.expiresAt <= Date.now()) {
+            if (cached) await gmDeleteValue(key);
+            return null;
+        }
+        return cached;
+    }
+
+    async function cacheWHMCS(email, data) {
+        await gmSetValue(emailCacheKey(email), {
+            data,
+            cachedAt: Date.now(),
+            expiresAt: Date.now() + WHMCS_CACHE_TTL_MS
+        });
     }
 
     function extractWHMCSToken() {
@@ -176,7 +231,10 @@
         lookupPanel.innerHTML = `
             <div id="gm-panel-header" style="padding: 12px; background-color: #007acc; color: white; border-top-left-radius: 8px; border-top-right-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
                 <strong style="font-size: 16px;">Lookup: ${target.value}</strong>
-                <button id="gm-close-btn" style="background: none; border: none; color: white; font-size: 18px; cursor: pointer; padding: 0 5px; line-height: 1;">&times;</button>
+                <div>
+                    <button id="gm-copy-btn" title="Copy lookup value" style="background: none; border: none; color: white; font-size: 15px; cursor: pointer; padding: 0 8px;">Copy</button>
+                    <button id="gm-close-btn" style="background: none; border: none; color: white; font-size: 18px; cursor: pointer; padding: 0 5px; line-height: 1;">&times;</button>
+                </div>
             </div>
             <div id="gm-tab-bar" style="display: flex; background-color: #2a2a2a; border-bottom: 1px solid #444;">
                 <button id="gm-tab-dns" class="gm-tab gm-tab-active" style="background: none; border: none; border-bottom: 2px solid #007acc; color: #4dcfff; padding: 10px 20px; cursor: pointer; font-size: 14px; font-weight: bold; transition: all 0.2s;">DNS Info</button>
@@ -194,6 +252,7 @@
 
         // Attach event handlers
         document.getElementById('gm-close-btn').addEventListener('click', hidePanel);
+        document.getElementById('gm-copy-btn').addEventListener('click', () => navigator.clipboard.writeText(target.value));
         document.getElementById('gm-tab-dns').addEventListener('click', () => switchTab('dns'));
         document.getElementById('gm-tab-whmcs').addEventListener('click', () => switchTab('whmcs'));
 
@@ -284,6 +343,8 @@
 
         let ipInfoHtml = '';
 
+        const allAddresses = [...(data.a_records || []), ...(data.aaaa_records || [])];
+
         if (data.isDomain && data.ip_geo_details.length > 0) {
             // Case 1: Domain Lookup with multiple A records / GeoIP entries
 
@@ -291,7 +352,7 @@
             ipInfoHtml += `
                 <div style="border-left: 3px solid #007acc; padding-left: 10px; margin-bottom: 15px;">
                     <h4 style="margin: 0 0 5px 0; color: #4dcfff; font-size: 14px;">Resolved A Records</h4>
-                    ${data.a_records.map(ip => `<p style="margin: 3px 0;"><strong style="color: #ccc;">A Record:</strong> ${ip}</p>`).join('')}
+                    ${allAddresses.map(ip => `<p style="margin: 3px 0;"><strong style="color: #ccc;">${ip.includes(':') ? 'AAAA' : 'A'} Record:</strong> ${ip}</p>`).join('')}
                 </div>
             `;
 
@@ -309,7 +370,7 @@
                 `;
             });
 
-        } else if (data.isDomain && data.a_records.length === 0) {
+        } else if (data.isDomain && allAddresses.length === 0) {
             // Case 2: Domain Lookup failed to resolve A record
             ipInfoHtml += `
                 <div style="border-left: 3px solid #e74c3c; padding-left: 10px; margin-bottom: 15px;">
@@ -349,10 +410,35 @@
                 ${createRecordSection('Mail Exchange (MX)', data.mx)}
                 ${createRecordSection('Canonical Name (CNAME)', data.cname)}
                 ${createRecordSection('Sender Policy (SPF/TXT)', data.spf)}
+                ${createRecordSection('DMARC', data.dmarc)}
+                ${createRecordSection('DKIM (common selectors)', data.dkim)}
+                ${createRecordSection('MTA-STS', data.mta_sts)}
+                ${createRecordSection('SMTP TLS Reporting', data.tls_rpt)}
+                ${createRecordSection('Certificate Authority Authorization (CAA)', data.caa)}
+                ${createRecordSection('Start of Authority (SOA)', data.soa)}
+                ${createRecordSection('DNSSEC', data.dnssec)}
+                ${generateDiagnosticsHTML(data.diagnostics)}
+                <details style="margin-top: 15px; color: #ccc;">
+                    <summary style="cursor: pointer; color: #4dcfff;">Raw API records</summary>
+                    <pre style="white-space: pre-wrap; font-size: 11px;">${JSON.stringify(data.raw_records || {}, null, 2)}</pre>
+                </details>
             `;
         }
 
         return html;
+    }
+
+    function generateDiagnosticsHTML(diagnostics) {
+        if (!diagnostics || diagnostics.length === 0) return '';
+        const colors = { error: '#e74c3c', warning: '#ffc107', info: '#17a2b8' };
+        return `
+            <h4 style="margin: 15px 0 8px 0; color: #4dcfff; border-bottom: 1px solid #444; padding-bottom: 5px; font-size: 14px;">Diagnostics</h4>
+            ${diagnostics.map(item => `
+                <div style="border-left: 3px solid ${colors[item.severity] || '#17a2b8'}; padding-left: 8px; margin: 6px 0; color: #ccc;">
+                    <strong>${item.severity.toUpperCase()}:</strong> ${item.message}
+                </div>
+            `).join('')}
+        `;
     }
 
     function createRecordSection(title, records) {
@@ -577,7 +663,7 @@
         };
     }
 
-    function fetchDNSInfo(target) {
+    function fetchDNSInfo(target, lookupId) {
         // For email addresses, skip DNS lookup and show email info instead
         if (target.type === 'email') {
             showPanel(target, {
@@ -585,6 +671,7 @@
                 isEmail: true,
                 ip_geo_details: [],
                 a_records: [],
+                aaaa_records: [],
                 ip_address: 'N/A',
                 ip_provider: 'N/A',
                 ip_location: 'N/A',
@@ -601,13 +688,15 @@
             isDomain: target.type === 'domain',
             ip_geo_details: [],
             a_records: target.type === 'domain' ? ['Loading...'] : [],
+            aaaa_records: [],
             ip_address: target.type === 'ip' ? 'Loading...' : 'N/A',
             // Removed ip_subnet from initial loading state
             ip_provider: 'Loading...',
             ip_location: 'Loading...'
         }, null);
 
-        const lookupUrl = API_URL + target.value;
+        const selectorQuery = target.type === 'domain' ? `?dkim_selectors=${encodeURIComponent(DKIM_SELECTORS.join(','))}` : '';
+        const lookupUrl = API_URL + encodeURIComponent(target.value) + selectorQuery;
 
         // --- REAL GM_xmlHttpRequest IMPLEMENTATION ---
         GM_XHR({
@@ -615,6 +704,13 @@
             url: lookupUrl,
             timeout: 10000,
             onload: function (response) {
+                if (lookupId !== currentLookupId) return;
+                if (response.status < 200 || response.status >= 300) {
+                    const dnsContent = document.getElementById('gm-dns-content');
+                    const errorData = { isDomain: target.type === 'domain', a_records: [], aaaa_records: [], ip_geo_details: [], ip_provider: 'API Error', ip_location: `HTTP ${response.status}`, ns: [], mx: [], cname: [], spf: [], ip_address: target.value };
+                    if (dnsContent) dnsContent.innerHTML = generateContentHTML(errorData);
+                    return;
+                }
                 if (!response.responseText || response.responseText.trim() === '') {
                     console.error("[Domain Lookup] API returned an empty response.");
                     // Removed ip_subnet from error data construction
@@ -625,13 +721,14 @@
 
                 try {
                     const data = JSON.parse(response.responseText);
-                    const ipGeoDetails = data.records.A_IP_Info || [];
+                    const ipGeoDetails = [...(data.records.A_IP_Info || []), ...(data.records.AAAA_IP_Info || [])];
 
                     let parsedData = {
                         isDomain: target.type === 'domain',
 
                         // A Records are used for display in the GeoIP section for domains
                         a_records: data.records.A || [],
+                        aaaa_records: data.records.AAAA || [],
 
                         // ip_geo_details contains the GeoIP data for all IPs
                         ip_geo_details: ipGeoDetails,
@@ -642,7 +739,16 @@
                         // Other records remain mapped to simple strings
                         mx: data.records.MX?.map(mx => `${mx.mail_server} (Priority ${mx.priority})`) || [],
                         cname: data.records.CNAME_WWW?.map(cname => cname.cname || cname) || [],
-                        spf: data.records.TXT?.filter(txt => txt.includes('v=spf1')) || [],
+                        spf: data.records.TXT?.filter(txt => txt.toLowerCase().startsWith('v=spf1')) || [],
+                        dmarc: data.records.DMARC || [],
+                        dkim: Object.entries(data.records.DKIM || {}).flatMap(([selector, values]) => values.map(value => `${selector}: ${value}`)),
+                        mta_sts: data.records.MTA_STS || [],
+                        tls_rpt: data.records.TLS_RPT || [],
+                        caa: data.records.CAA?.map(record => `${record.flags} ${record.tag} ${record.value}`) || [],
+                        soa: data.records.SOA ? [`${data.records.SOA.mname} / ${data.records.SOA.rname} / serial ${data.records.SOA.serial}`] : [],
+                        dnssec: data.records.DNSSEC ? [`${data.records.DNSSEC.status} — ${data.records.DNSSEC.note}`] : [],
+                        diagnostics: data.records.diagnostics || [],
+                        raw_records: data.records,
                     };
 
                     // For IP lookups, we populate the single-IP fields from the first entry
@@ -678,6 +784,7 @@
                 }
             },
             onerror: function (response) {
+                if (lookupId !== currentLookupId) return;
                 console.error("[Domain Lookup] GM_xmlHttpRequest FAILED. Status:", response.status, "Details:", response);
                 // Removed ip_subnet from error data construction
                 const errorData = { isDomain: target.type === 'domain', a_records: target.type === 'domain' ? ['GM_XHR Failed'] : [], ip_geo_details: [], ip_provider: 'Network/Security Error', ip_location: `Status: ${response.status}. See console.`, ns: [], mx: [], cname: [], spf: [], ip_address: 'N/A' };
@@ -687,6 +794,7 @@
                 }
             },
             ontimeout: function () {
+                if (lookupId !== currentLookupId) return;
                 console.error("[Domain Lookup] GM_xmlHttpRequest TIMEOUT FIRED.");
                 // Removed ip_subnet from error data construction
                 const errorData = { isDomain: target.type === 'domain', a_records: target.type === 'domain' ? ['Timeout (10s)'] : [], ip_geo_details: [], ip_provider: 'Request Timed Out', ip_location: 'Server took too long to respond.', ns: [], mx: [], cname: [], spf: [], ip_address: 'N/A' };
@@ -698,13 +806,50 @@
         });
     }
 
-    function fetchWHMCSInfo(searchTerm, token) {
+    function renderWHMCSData(data, target, cacheInfo = null) {
+        const whmcsContent = document.getElementById('gm-whmcs-content');
+        if (!whmcsContent) return;
+        const cacheBanner = cacheInfo ? `
+            <div style="margin-bottom: 10px; padding: 8px; background: #29434e; border-radius: 4px; color: #ddd; font-size: 11px;">
+                Cached ${new Date(cacheInfo.cachedAt).toLocaleString()} (expires ${new Date(cacheInfo.expiresAt).toLocaleString()})
+                <button id="gm-whmcs-refresh" style="float: right; border: 0; border-radius: 3px; cursor: pointer;">Refresh</button>
+            </div>` : '';
+        whmcsContent.innerHTML = cacheBanner + generateWHMCSContentHTML(data);
+        const refreshButton = document.getElementById('gm-whmcs-refresh');
+        if (refreshButton) refreshButton.addEventListener('click', () => loadWHMCSInfo(target, true));
+    }
+
+    async function loadWHMCSInfo(target, forceRefresh = false) {
+        const lookupId = currentLookupId;
+        if (target.type === 'email' && !forceRefresh) {
+            const cached = await getCachedWHMCS(target.value);
+            if (lookupId !== currentLookupId) return;
+            if (cached) {
+                renderWHMCSData(cached.data, target, cached);
+                return;
+            }
+        }
+
+        const whmcsContent = document.getElementById('gm-whmcs-content');
+        if (whmcsContent) whmcsContent.innerHTML = '<div style="text-align:center;padding:40px;color:#aaa;">Searching WHMCS...</div>';
+        fetchFreshWHMCSToken(function (token) {
+            if (lookupId !== currentLookupId) return;
+            if (token) {
+                fetchWHMCSInfo(target, token, lookupId);
+            } else {
+                const content = document.getElementById('gm-whmcs-content');
+                if (content) content.innerHTML = generateWHMCSErrorHTML('Failed to fetch WHMCS token. Please check your connection and WHMCS session.');
+            }
+        });
+    }
+
+    function fetchWHMCSInfo(target, token, lookupId) {
         // Update WHMCS tab with loading state (already set in showPanel initial call)
 
         // Prepare POST data
         const formData = new URLSearchParams();
         formData.append('token', token);
-        formData.append('searchterm', searchTerm);
+        formData.append('searchterm', target.value);
         formData.append('hide_inactive', '0');
         formData.append('more', '');
 
@@ -716,14 +861,14 @@
             },
             data: formData.toString(),
             timeout: 60000,
-            onload: function (response) {
+            onload: async function (response) {
+                if (lookupId !== currentLookupId) return;
                 try {
+                    if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`);
                     const data = JSON.parse(response.responseText);
-                    const whmcsHtml = generateWHMCSContentHTML(data);
-                    const whmcsContent = document.getElementById('gm-whmcs-content');
-                    if (whmcsContent) {
-                        whmcsContent.innerHTML = whmcsHtml;
-                    }
+                    if (target.type === 'email') await cacheWHMCS(target.value, data);
+                    if (lookupId !== currentLookupId) return;
+                    renderWHMCSData(data, target);
                 } catch (e) {
                     console.error('[WHMCS] Error parsing response:', e);
                     console.log(WHMCS_API_URL)
@@ -735,6 +880,7 @@
                 }
             },
             onerror: function (response) {
+                if (lookupId !== currentLookupId) return;
                 console.error('[WHMCS] Request failed:', response);
                 const whmcsContent = document.getElementById('gm-whmcs-content');
                 if (whmcsContent) {
@@ -742,6 +888,7 @@
                 }
             },
             ontimeout: function () {
+                if (lookupId !== currentLookupId) return;
                 console.error('[WHMCS] Request timed out');
                 const whmcsContent = document.getElementById('gm-whmcs-content');
                 if (whmcsContent) {
@@ -782,26 +929,13 @@
                     // Prevent the panel from closing immediately if a valid selection is made
                     event.stopPropagation();
                     isPanelActive = true;
+                    const lookupId = ++currentLookupId;
 
                     // Fetch DNS info (will show panel with loading states)
-                    fetchDNSInfo(target);
+                    fetchDNSInfo(target, lookupId);
 
-                    // Fetch fresh WHMCS token in background and perform search
-                    fetchFreshWHMCSToken(function (token) {
-                        if (token) {
-                            console.log('[WHMCS] Fresh token obtained, initiating search...');
-                            fetchWHMCSInfo(target.value, token);
-                        } else {
-                            console.warn('[WHMCS] Failed to fetch fresh token.');
-                            // Update WHMCS tab to show error
-                            setTimeout(() => {
-                                const whmcsContent = document.getElementById('gm-whmcs-content');
-                                if (whmcsContent) {
-                                    whmcsContent.innerHTML = generateWHMCSErrorHTML('Failed to fetch WHMCS token. Please check your connection and ensure you can access my.dominios.pt.');
-                                }
-                            }, 100); // Small delay to ensure panel is created
-                        }
-                    });
+                    // Email searches use a one-week local cache; other target types always fetch live data.
+                    loadWHMCSInfo(target);
                 }
             }
             // Don't hide panel when selection changes - let user keep it open
