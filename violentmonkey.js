@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Domain/IP/WHMCS Information Lookup
 // @namespace    http://terramoto.xyz/
-// @version      2.6
+// @version      2.7
 // @description  Detects selected domains or IPs and displays a floating panel with DNS and GeoIP information using an external API.
 // @author       Terramoto
 // @match        *://*/*
@@ -30,8 +30,7 @@
     const WHMCS_ROOT = '';
     const WHMCS_API_URL = `${WHMCS_ROOT}search/intellisearch`;
     const WHMCS_CACHE_PREFIX = 'domain-info-whmcs-email:';
-    const WHMCS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-    const WHMCS_CACHE_SCHEMA_VERSION = 2;
+    const WHMCS_CACHE_SCHEMA_VERSION = 3;
     const WHMCS_CPANEL_LOGIN_HASH = '#gm-login-cpanel';
     const WHMCS_SERVICE_FETCH_CONCURRENCY = 3;
     const DKIM_SELECTORS = ['default', 'selector1', 'selector2', 'google'];
@@ -125,21 +124,35 @@
     async function getCachedWHMCS(email) {
         const key = emailCacheKey(email);
         const cached = await gmGetValue(key, null);
-        if (!cached || cached.schemaVersion !== WHMCS_CACHE_SCHEMA_VERSION ||
-            !cached.expiresAt || cached.expiresAt <= Date.now()) {
+        if (!cached || ![2, WHMCS_CACHE_SCHEMA_VERSION].includes(cached.schemaVersion) ||
+            !cached.data || !cached.cachedAt) {
             if (cached) await gmDeleteValue(key);
             return null;
         }
+
+        // Version 2 entries had a seven-day expiry. Migrate them in place without
+        // discarding their data, even when that old expiry date has passed.
+        if (cached.schemaVersion === 2) {
+            const migrated = {
+                schemaVersion: WHMCS_CACHE_SCHEMA_VERSION,
+                data: cached.data,
+                cachedAt: cached.cachedAt
+            };
+            await gmSetValue(key, migrated);
+            return migrated;
+        }
+
         return cached;
     }
 
     async function cacheWHMCS(email, data) {
-        await gmSetValue(emailCacheKey(email), {
+        const cached = {
             schemaVersion: WHMCS_CACHE_SCHEMA_VERSION,
             data,
-            cachedAt: Date.now(),
-            expiresAt: Date.now() + WHMCS_CACHE_TTL_MS
-        });
+            cachedAt: Date.now()
+        };
+        await gmSetValue(emailCacheKey(email), cached);
+        return cached;
     }
 
     function extractWHMCSToken() {
@@ -1084,7 +1097,7 @@
         if (!whmcsContent) return;
         const cacheBanner = cacheInfo ? `
             <div style="margin-bottom: 10px; padding: 8px; background: #29434e; border-radius: 4px; color: #ddd; font-size: 11px;">
-                Cached ${new Date(cacheInfo.cachedAt).toLocaleString()} (expires ${new Date(cacheInfo.expiresAt).toLocaleString()})
+                Saved ${new Date(cacheInfo.cachedAt).toLocaleString()} — refresh to update
                 <button id="gm-whmcs-refresh" style="float: right; border: 0; border-radius: 3px; cursor: pointer;">Refresh</button>
             </div>` : '';
         whmcsContent.innerHTML = cacheBanner + generateWHMCSContentHTML(data);
@@ -1143,9 +1156,11 @@
                         data = await enrichEmailSearchWithServices(data, target.value);
                     }
                     if (lookupId !== currentLookupId) return;
-                    if (target.type === 'email') await cacheWHMCS(target.value, data);
+                    const cacheInfo = target.type === 'email'
+                        ? await cacheWHMCS(target.value, data)
+                        : null;
                     if (lookupId !== currentLookupId) return;
-                    renderWHMCSData(data, target);
+                    renderWHMCSData(data, target, cacheInfo);
                 } catch (e) {
                     console.error('[WHMCS] Error parsing response:', e);
                     console.log(WHMCS_API_URL)
@@ -1211,7 +1226,7 @@
                     // Fetch DNS info (will show panel with loading states)
                     fetchDNSInfo(target, lookupId);
 
-                    // Email searches use a one-week local cache; other target types always fetch live data.
+                    // Email searches use persistent local storage; other target types always fetch live data.
                     loadWHMCSInfo(target);
                 }
             }

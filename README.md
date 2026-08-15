@@ -8,8 +8,10 @@ I did this for IT work, it helps find domains details without having to go to ot
 A Violentmonkey userscript is available that allows you to select domains or IPs on any webpage and retrieve DNS information through this API service.
 
 The userscript can also search the configured WHMCS staff interface. Searches made with a
-client email address are cached in Violentmonkey's private storage for seven days. Cached
-results include a **Refresh** action to bypass the cache and replace the saved entry.
+client email address are cached in Violentmonkey's private persistent storage with no
+time-based expiry, so they remain available after a browser restart. Cached results include
+a **Refresh** action to bypass the cache and replace the saved entry. The cache remains until
+it is refreshed or the browser/userscript data is cleared.
 For an exact client email match, the script also reads that client's products from the
 WHMCS 7.x `clientsservices.php` staff page and displays their current status. Active
 hosting services expose **Login to cPanel** only when WHMCS provides the native cPanel
